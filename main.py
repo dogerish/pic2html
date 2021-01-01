@@ -1,5 +1,5 @@
 #! /usr/bin/python3
-import sys
+import sys, re
 from PIL import Image
 
 # return the argument if it exists (converted to the same type as the default), otherwise default
@@ -7,32 +7,36 @@ default = lambda arg, defa: type(defa)(sys.argv[arg]) if len(sys.argv) > arg and
 
 # filename of image to evaluate, default is image.jpg
 IMAGE = default(1, "image.jpg")
-# output columns (width)
-COLS = default(2, 200)
+# filename of output, default just prints it to stdout
+OUTPUT = default(2, "")
+# outputs in defined way based on whether or not an output file is given
+if OUTPUT == "": output = print
+else:
+    def output(*args, **kwargs):
+        with open(OUTPUT, "w+") as ofile:
+            ofile.write(*args, **kwargs)
 
-# colors, color name: (r, g, b)
-COLORS = \
-{
-    "white":        (255, 255, 255),
-    "#BFBFBF":      (191, 191, 191),
-    "gray":         (127, 127, 127),
-    "#3F3F3F":      (63, 63, 63),
-    "black":        (0, 0, 0),
-    "red":          (255, 0, 0),
-    "orange":       (255, 127, 0),
-    "yellow":       (255, 255, 0),
-    "#808000":      (127, 127, 0),
-    "#80FF00":      (127, 255, 0),
-    "lime":         (0, 255, 0),
-    "green":        (0, 127, 0),
-    "#003F00":      (0, 63, 0),
-    "#001F00":      (0, 31, 0),
-    "#00FF80":      (0, 255, 127),
-    "turquoise":    (0, 255, 255),
-    "blue":         (0, 0, 255),
-    "magenta":      (255, 0, 255),
-    "purple":       (127, 0, 127)
-}
+# output columns (width)
+COLS = default(3, 200)
+
+# color hues (degrees, [0-360))
+COLORS = dict()
+with open('colors.txt') as f:
+    # each line in the file
+    for line in f.readlines():
+        # means comment
+        if line.startswith('#'): continue
+        # name: hue saturation
+        # split bt name and values
+        line = line.split(':')
+        # split values with whitespace characters
+        line = [line[0], *line[1].strip().split('\t')]
+        # strip blank things from each piece
+        for i, piece in enumerate(line): line[i] = piece.strip()
+        # add key to COLORS
+        name, hue, sat = line
+        COLORS[name] = (None if hue == '*' else int(hue), None if sat == '*' else float(sat))
+
 # characters for lightness values (ascending)
 CHARS = " -+:!?%#&$@"
 
@@ -88,32 +92,57 @@ class Color:
     
     # get the lightness of this color as a decimal percent
     # 1 means brightest, 0 means darkest, 0.5 means middle...
-    def lightness(self):
+    def graylightness(self):
         return self.sum() / 765
 
+    # returns the hsl version of this color
+    def hsl(self):
+        ## setup
+        # normalized version of self
+        nself = self / 255
+        # rgb values
+        vals = nself.for_each(lambda x: x)
+        x, n = max(vals), min(vals) # max value
+        d = x - n # difference bt max and min
+
+        ## hue
+        hue = 0;
+        if d == 0: pass # max and min same
+        elif x == nself.r: hue = 60*( (nself.g - nself.b) / d % 6 ) # r is max
+        elif x == nself.g: hue = 60*( (nself.b - nself.r) / d + 2 ) # g is max
+        else: hue = 60*( (nself.r - nself.g) / d + 4 ) # b is max
+
+        lightness = (x + n) / 2 ## lightness
+        saturation = 0 if d == 0 else d / (1 - abs(2*lightness - 1)) ## saturation
+
+        # add 360 to hue if it's negative
+        return (hue < 0)*360 + hue, saturation, lightness
+
     # approximate a given color to be one of the colors listed in COLORS
-    # works by adding all of the differences in rgb values. lowest wins
-    def approx(self):
+    # works by comparing hue values. lowest difference wins
+    def approx(self, hsl=None):
+        if hsl == None: hsl = self.hsl()
+        hue, sat = hsl[:2]
         # the best one so far: (score, name, diff)
         best = (None, None, None)
-        for color in COLORS.keys():
-            color = COLORS[color]
-            diff = self.diff(color)
-            # get the sum of the differences - this is the score
-            score = diff.sum()
+        for name in COLORS.keys():
+            chue, csat = COLORS[name]
+            a, am, b, bm = 0, 2, 0, 2
+            # if hue does matter
+            if chue != None: a, bm = abs(hue - chue)/360, 1
+            # if saturation does matter
+            if csat != None: b, am = abs(sat - csat), 1
+            # sum of difference in hue and saturation is the score
+            score = a*am + b*bm
             # if this is a new best score
             if best[0] == None or score < best[0]:
-                best = (score, color.name, diff)
+                best = (score, name)
         # return the name of the best color
-        return best
+        return best[1]
 
     # color the string the color that the name describes
     def color_str(self, string, colorName):
         return f'<font color="{colorName}">{string}'
-
-# convert all the colors in COLORS to Color objects (with the corresponding name)
-for color in COLORS.keys():
-    COLORS[color] = Color(*COLORS[color], name=color)
 
 # where the output will be accumulated to
 accumulator = '<body style="background-color: #000"><pre>'
@@ -147,11 +176,12 @@ with Image.open(IMAGE) as img:
             # turn sum into average
             avgcolor /= colorc
 
+            # get the hsl version
+            hsl = avgcolor.hsl()
             # approximate the color
-            score, apcolor, diff = avgcolor.approx()
+            apcolor = avgcolor.approx(hsl)
             # pick the right character based on the lightness
-            # pick max "brigthness" if it's 0
-            char = CHARS[round((1 - diff.lightness())*(len(CHARS) - 1))]
+            char = CHARS[round(hsl[2]*(len(CHARS) - 1))]
             # if it isn't already in the right color, change it
             if apcolor != curcolor:
                 # add colored string to accumulator
@@ -163,5 +193,5 @@ with Image.open(IMAGE) as img:
                 accumulator += char
 # end the elements
 accumulator += "</font></pre></body>"
-# print the result
-print(accumulator)
+# output the result
+output(accumulator)
